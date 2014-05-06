@@ -1,0 +1,370 @@
+#!/bin/bash
+#
+# bgbuilder, release 7 Apr 2009 (0.1.0)
+# Created by Matthew Saunier
+#
+# Takes the drudgery out of changing your 4Dwm backgrounds.
+#
+# Xli supports more formats than this script does, it should be possible
+# to enable .xpm, .xbm, .xmp, .tga, etc. with or without conversion to JPEG.
+# This is a version 0.2 feature, along with being written in C...
+#
+# FYI: Recommended resolutions for a given aspect ratio.
+# 5:4, 1280x1024, doesn't scale to anything.
+# 4:3, 1600x1200, scales to PAL and most other non-wide resolutions.
+# 3:2, 1440x960, scales to NTSC and some uncommon non-wide resolutions.
+# 16:10, 2560x1600, scales to most wide computer displays.
+# 16:9, 1920x1080, scales to most wide broadcast formats.
+
+cmd=`basename "$0"`	# Probably bgbuilder
+usage="Usage: $cmd [-v] [-s] [-a] [-c] [-f] [-d description] [-id directory]\n
+[-of filename] [-od directory] -r XxY\n
+\n
+-v	Verbose - employ maximum verbosity.\n
+-s	Silent - suppress all status messages.\n
+-a	Append - Append /usr/lib/X11/system.backgrounds to the output file.\n
+	This preserves the IRIX default backgrounds in the background\n
+	control panel.\n
+-c	Clobber - Clobber the output file. Default behavior is to append\n
+	to an existing file. Useful for completely rebuilding your backgrounds.\n
+-f	Force - Forces $cmd to run, even if IRIX64 is not detected as the OS.\n
+-d	Description - Appended to the file descriptor in the output file.\n
+	If omitted, defaults to the output resolution in the format XxY.\n
+-id	Input directory - All JPEG, GIF, and PNG files in this directory\n
+	are used. Defaults to ./\n
+-of	Output file - An IRIX background file is created here. Defaults to\n
+	~/.backgrounds\n
+-od	Output directory - Scaled image files are stored here. Defaults to\n
+	~/wallpaper\n
+-r	Resolution - Output resolution, separated by an x. Ex: 1024x768 or\n 
+	1680x1050. This is a required value.\n
+\n
+This tool only works with gif, jpeg, and png files having extensions .gif,\n
+.jpg, .jpeg, and .png, and only files which are recognizable by mogrify.\n
+Imagemagick, xli, and bash are required for usage, and are available\n
+from the Nekoware repositories for all recent versions of IRIX, and\n
+possibly from TGCware or SGI freeware for older versions.\n
+\n
+You must set your X color depth to 24 for this script to work properly.\n
+If you have not already done so, add \"-class TrueColor -depth 24\"\n
+to the first line of /var/X11/xdm/Xservers. Your mileage may vary on exotic\n
+or very old hardware."
+
+egrepstr='-i .jpg$|.jpeg$|.gif$|.png$'	# Supported filetypes
+verbosity=1	# Medium verbosity. 0 is silent, 2 is maximum.
+append=0
+clobber=0
+force=0
+desc=""
+outdir=~/wallpaper
+outfile=~/.backgrounds
+indir=`pwd`
+resraw=""
+resx=0
+resy=0
+tmpdir=/tmp/$$$RANDOM	# PID plus a random integer
+xlipath=""
+
+if [ $# = 0 ]	# No options were given
+then
+	echo -e $usage
+	exit 1
+fi
+
+while : 	
+do 
+	case $1 in
+		-v)	verbosity=2 ;;
+		-s)	verbosity=0 ;;
+		-a)	append=1 ;;
+		-c)	clobber=1 ;;
+		-f)	force=1 ;;
+		-d)	desc=$2 ; shift ;;
+		-of)	outfile=$2 ; shift ;;
+		-od)	outdir=$2 ; shift ;;
+		-id)	indir=$2 ; shift ;; 
+		-r)	resraw=$2 ; shift ;;
+		-help)	echo -e $usage ; exit 0 ;;	# Show usage and quit
+		--)	shift ; break ;;	# Discard leading dash
+		-*)	echo "$cmd: unrecognised option: $1" >&2 ; exit 1 ;;
+		*)	break ;;	# Time to quit
+	esac
+	shift
+done
+
+# IRIX check
+if [ ! `uname` = "IRIX64" ]
+then
+	if [ $force = 0 ]
+	then
+		echo "$cmd: this does not appear to be an IRIX64 system. Use -f to override."
+		exit 1
+	fi
+	if [ $verbosity !=  0 ]
+	then
+		echo "$cmd: this system appears to be `uname`, not IRIX64. Continuing..."	
+	fi
+fi
+
+# Dependency checks - bash returns an errorlevel of 127 for file not found.
+bc --version &> /dev/null
+if [ $? = 127 ]
+then
+	echo "$cmd: bc could not be found in path"
+	exit 1
+fi	
+egrep &> /dev/null
+if [ $? = 127 ]
+then
+	echo "$cmd: egrep could not be found in path"
+	exit 1
+fi	
+mogrify &> /dev/null
+if [ $? = 127 ]
+then
+	echo "$cmd: mogrify could not be found in path"
+	exit 1
+fi	
+sed &> /dev/null
+if [ $? = 127 ]
+then
+	echo "$cmd: sed could not be found in path"
+	exit 1
+fi	
+
+# Xli needs to be located
+for dir in `echo $PATH | sed 'y/:/\n/'`
+do
+	if [ -e $dir/xli ]
+	then
+		xlipath=$dir/xli
+		break
+	fi
+done
+if [ $xlipath = "" ]
+then
+	echo "$cmd: xli could not be found in path"
+	exit 1
+fi
+
+# IRIX treats / and // the same, but double slashes are bad form.
+echo $indir | egrep '/$'
+if [ $? = 0 ]
+then
+	indir=`echo $indir | sed 's/.$//'`
+fi
+echo $outdir | egrep '/$'
+if [ $? = 0 ]
+then
+	outdir=`echo $outdir | sed 's/.$//'`
+fi
+
+if [ "$resraw" = "" ]
+then
+	echo "$cmd: -r is a required switch"
+	exit 1
+fi
+
+resx=`echo $resraw | cut -dx -f1`
+resy=`echo $resraw | cut -dx -f2`
+
+# There's probably a much more compact way to do this...
+test $resx -gt 0 &> /dev/null
+if [ $? != 0 ]
+then
+	echo "$cmd: bad X resolution: $resx"
+fi  
+test $resx -le 4096 &> /dev/null
+if [ $? != 0 ]
+then
+	echo "$cmd: bad X resolution: $resx"
+fi  
+test $resy -gt 0 &> /dev/null
+if [ $? != 0 ]
+then
+	echo "$cmd: bad Y resolution: $resy"
+fi  
+test $resy -le 4096 &> /dev/null
+if [ $? != 0 ]
+then
+	echo "$cmd: bad Y resolution: $resx"
+fi
+
+# Create a description, if none was given
+if [ "$desc" = "" ]
+then
+	desc=$resx"x"$resy
+fi
+desc=" ($desc)"
+
+# Sanity check for source files. See the egrep man page for errorlevels.
+ls $indir | egrep $egrepstr &> /dev/null
+if [ $? != 0 ]
+then
+	echo "$cmd: no valid input files could be found at $indir"
+	exit 1
+fi
+
+# Create cache directory
+mkdir $tmpdir &> /dev/null
+if [ $? != 0 ]
+then
+	echo "$cmd: could not create $tmpdir"
+	exit 1
+fi
+
+# Attempt to backup the specified output file, if it exists, and verify access.
+if [ -e $outfile ]
+then
+	mv $outfile $outfile.old
+	if [ $? != 0 ]
+	then
+		echo "$cmd: could not write to $outfile"
+		exit 1
+	fi
+fi
+if [ $clobber = 0 ]
+then
+	cp $outfile.old $outfile
+fi
+
+# Check output directory
+if [ ! -d $outdir ]
+then
+	echo "$cmd: $outdir/ does not exist"
+	exit 1
+fi
+
+# Copy files to cache and get rid of spaces, cp and mv HAET spaces!
+# I cannot claim to truly know why this next line works, but it does, and
+# it is fragile. Do not break it!
+for file in `ls $indir | egrep $egrepstr`
+do
+	find $indir -name $file* -print | while read i; do cp "${i}" $tmpdir; done
+done
+for file in $tmpdir/*
+do
+	new=`echo $file | sed 'y/ /_/'`
+	echo $file | xargs -i mv {} $new &> /dev/null
+done
+
+# The extensions look good, but mogrify may still trip over a corrupt file.
+# Also, if mogrify is interrupted it will probably crunch the input file.
+# This is OK, since crunching the cache doesn't really hurt anything.
+
+if [ $verbosity != 0 ]
+then
+	numfiles=`ls $tmpdir | wc -l | sed 's/ //g'`
+	echo "$cmd: $numfiles images found, identifying..."
+fi
+
+#TODO: make sure that the input files are less than 10K pixels or so on a side.
+for file in $tmpdir/*
+do
+	mogrify -identify $file > $file.ident	# Cache it
+	if [ $? != 0 ]
+	then
+		rm $file
+		rm $file.ident
+	fi
+done
+
+if [ $verbosity != 0 ]
+then
+	numok=`ls $tmpdir | egrep '.ident$' | wc -l | sed 's/ //g'`
+	echo "$cmd: $numok of $numfiles images are OK"
+fi
+
+for identfile in $tmpdir/*.ident
+do
+	ident=`cat $identfile`
+	file=`echo $ident | cut -d' ' -f1`
+	filebase=`basename $file` 	
+	oldx=`echo $ident | cut -d' ' -f3 | cut -d'x' -f1` 	
+	oldy=`echo $ident | cut -d' ' -f3 | cut -d'x' -f2`
+	
+	oldaspect=`echo "scale=3;$oldx/$oldy" | bc`
+	newaspect=`echo "scale=3;$resx/$resy" | bc`
+
+	relaspect=`echo "scale=3;$oldaspect/$newaspect" | bc`
+	relmills=`echo "$relaspect*1000" | bc | cut -d'.' -f1`
+	
+	if [ $verbosity = 2 ]
+	then
+		echo
+		echo "$cmd: file: $file"
+		echo "$cmd: old resolution: "$oldx"x"$oldy
+		echo "$cmd: old aspect ratio: $oldaspect"
+		echo "$cmd: new resolution: "$resx"x"$resy
+		echo "$cmd: new aspect ratio: $newaspect"
+		echo "$cmd: relative ratio: $relaspect"
+		echo
+	fi	
+
+	# Crop width
+	if [ "$relmills" -gt "1000" ]
+	then
+		echo "$cmd: $filebase: resizing and cropping width..."	
+		resizeopt="9999x"$resy
+		cropopt=$resx"x"$resy"+0+0"
+		mogrify -resize $resizeopt -crop $cropopt $file
+	fi
+
+	# No cropping
+	if [ "$relmills" -eq "1000" ]
+	then
+		echo "$cmd: $filebase: resizing..."	
+		resizeopt=$resx"x"$resy
+		mogrify -resize $resizeopt $file
+	fi
+
+	# Crop height
+	if [ "$relmills" -lt "1000" ]
+	then
+		echo "$cmd: $filebase: resizing and cropping height..."	
+		resizeopt=$resx"x9999"
+		cropopt=$resx"x"$resy"+0+0"
+		mogrify -resize $resizeopt -crop $cropopt $file
+	fi
+done
+
+if [ $verbosity != 0 ]
+then
+	echo "$cmd: building $outfile"
+fi
+
+rm $tmpdir/*.ident
+
+# Iterate through the output directory and build a background file
+
+for file in $tmpdir/*
+do
+	name=`basename $file | cut -d'.' -f1 | sed 'y/_/ /'`
+	thisfile=$outdir/`basename $file`
+	thisdesc=$name$desc
+	background="background \"$thisdesc\""
+	command="command \"-execute $xlipath -fillscreen -onroot -fork $thisfile\""
+	default="default \"-execute $xlipath -fillscreen -onroot -fork $thisfile\""
+	exeok="exeok \"$xlipath\""
+	readok="readok \"$file\""
+
+	echo $background >> $outfile
+	echo $command >> $outfile
+	echo $default >> $outfile
+	echo $exeok >> $outfile
+	echo $readok >> $outfile
+	echo >> $outfile
+done
+
+if [ $append = 1 ]
+then
+	cat /usr/lib/X11/system.backgrounds >> $outfile
+fi
+
+if [ $verbosity != 0 ]
+then
+	echo "$cmd: finished"	
+fi
+
+mv $tmpdir/* $outdir
+rm -Rf $tmpdir
